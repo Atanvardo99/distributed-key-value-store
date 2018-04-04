@@ -2,17 +2,19 @@ a distributed in memory key-value store, dynamically add/remove server, support 
 
 precondition/assumption:
 both servers and proxy are fault-tolerance, proxy is consistence while server could shutdown correctly
-all requests are handled probably
+all requests/responses are handled probably
 
 
 support:
-multiple users, each client has an id which is stored with data in server
-dynamically add/remove servers (works but not efficient)
+single users, which could insert, select, update, delete data
+dynamically add/remove servers (works but not efficient), load balance
 
 doesn't implement, but could:
 encryption
+multi-user
 if a server is full, reassign its add request to other server
 generate id for client
+more proficient load balance algorithm
 
 flaws:
 if a new server is added, all other server will calculate all data to transfer to this new server
@@ -23,10 +25,12 @@ handling requests when transferring data to/from other servers
 
 
 dynamically add/remove servers
-proxy maintains a server list, which includes address and server id (assigned when first connect to server),
+proxy maintains a server list(map actually), which includes address and server id (assigned when first connect to server),
 and maintains a heartbeat to each server periodically
+use a hash-circle to assign requests
 
 server has 5 states
+    0: dead server
     1: onboot, getting data from other servers
     2: normal, could handle requests from proxy
     3: full,
@@ -46,6 +50,12 @@ when new server booting up, it would acquire corresponding data from other serve
 requests to those servers. when shutting down, it would sending data to corresponding servers and the proxy would still
 reassign requests to this server.
 
+
+things could do to improve efficiency
+1. a precise algorithm to generate the id of servers
+2. a mark to mark the data transferred from other servers
+
+
 other solutions that may work, but i didn't think about the details:
 1. set a limitation of servers that proxy could connect to, e.g. 10, every time the proxy mods hash value by that number
 each server stores the final hash value with data
@@ -53,5 +63,3 @@ each server stores the final hash value with data
     2 servers condition, server0 transfers second half to server1
     3 servers condition, both server0 and server1 transfer 1/3 data to server2
     ...
-
-2. more complex hash function
