@@ -102,9 +102,26 @@ func main(){
 
 	add("123", "12345")
 	addmap(map[string]string{"qwer":"qwert", "qw": "qwer"})
+	add("1", "12345")
+	add("12", "12345")
 
+	add("1234", "12345")
+	add("12345", "12345")
+
+	add("123ahey89", "12345")
+	add("12zvcv367", "12345")
+	add("1nrgzr9", "12345")
+	add("knn1ghv67", "12345")
+	add("jdsfc389", "12345")
 	_, m, _ :=choose("123")
 	fmt.Println(m["123"])
-	//fmt.Println(remove("qwer"))
+	_, m2, _ := choose("1")
+	fmt.Println(m2)
+	_, m3, _ := choose("12")
+	fmt.Println(m3)
+
+	_, m4, _ := choose("qwer")
+	fmt.Println(m4)
+
 
 }

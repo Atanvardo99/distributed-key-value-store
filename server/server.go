@@ -2,16 +2,12 @@ package main
 
 
 import(
-	//"fmt"
-	//"io/ioutil"
 	"net/http"
 	"encoding/json"
 	"time"
 	"log"
 	"flag"
 	"bytes"
-	"fmt"
-	//"strconv"
 	"os"
 	"os/signal"
 	"syscall"
@@ -19,21 +15,19 @@ import(
 )
 const port string = ":9010"
 const proxy string = "http://localhost:9000"
+const maximum = 1<< 8
 
 const local = "http://localhost" + port
 
 var results []string
-var serverTable map[int] dataFlow
 var serverId string = ""
-// simplified maximum storage upper bound
+var serverTable = make(map[string]serverStatus)
+var serverMap = make(map[string]string)
+var max = 0
 const maxStorage int = 100
 
 
-// storage, outside key is client id, with value of its key-value
-// selfstore contains keys of corresponding hash value, while helpstore constians data from other abnormal server
-var selfstore = make(map[string] map[string]string)
-var helpstore = make(map[string] map[string]string)
-
+var store = make(map[string]string)
 var totalNum int
 var status string
 
@@ -45,48 +39,29 @@ type Reqs struct{
 	Identify string
 
 }
-type Acquire struct {
-
-	Reqtype string
-	M map[string] map[string]string
-	TimeStamp time.Time
-	Identify string
-}
-//type ServerReq struct{
-//	Reqtype string
-//	Addr string
-//	TimeStamp time.Time
-//	Identify string
-//}
-
-type heartBeat struct{
-
-	Status string
-	Uptime string
-}
-type heartBeatReq struct{
-
-	ReqType string
+type serverStatus struct{
+	addr string
+	status int
 
 }
+
 type dataFlow struct{
 
 	addr string
-
 	// 0: no data transaction
 	// 1: get data from server
 	// 2: send data to server
 	flow int
 }
 
-func availableNext(m map[int]string, i int) int{
+func availableNext(m map[string]serverStatus, si string) int{
 
-	//var next = 0
 	var temp = 1 << 31
-	for k, _ := range m{
-
-		if k - i < temp && k - i > 0{
-			temp = k - i
+	i,_ := strconv.Atoi(si)
+	for k, v := range m{
+		ki,_ := strconv.Atoi(k)
+		if ki - i < temp && ki - i > 0 && v.status != 0{
+			temp = ki - i
 		}
 
 	}
@@ -97,13 +72,36 @@ func availableNext(m map[int]string, i int) int{
 		return minNum(m)
 	}
 }
+func assign(i int) int{
 
-func minNum(m map[int]string) int{
+	if _, ok := serverTable[strconv.Itoa(i)]; ok &&serverTable[strconv.Itoa(i)].status !=0{
+		return i
+	}
+	for ; i  >= 0; i--{
+		if _, ok := serverTable[strconv.Itoa(i)]; ok{
+			if serverTable[strconv.Itoa(i)].status  ==0{
+				return assign(i - 1)
+			}
+			return i
+		}
+	}
+	for k := maximum - 1; k > i; k--{
+		if _, ok := serverTable[strconv.Itoa(k)]; ok{
+			if serverTable[strconv.Itoa(k)].status  ==0{
+				return assign(k - 1)
+			}
+			return k
+		}
+	}
+	return 0
+}
+
+func minNum(m map[string]serverStatus) int{
 	var i = 1<<31
-	for k, _ := range m{
-
-		if k < i{
-			i = k
+	for k, v := range m{
+		ki,_ := strconv.Atoi(k)
+		if ki < i && v.status != 0{
+			i = ki
 		}
 	}
 	return i
@@ -136,7 +134,6 @@ func afterboot(){
 	encode := new(bytes.Buffer)
 	json.NewEncoder(encode).Encode(jsonBody)
 	client := http.Client{}
-	//url := url.URL{Host:"localhost:9001"}
 	request, err := http.NewRequest("POST", proxy, encode)
 	if err != nil {
 		log.Fatalln(err)
@@ -151,16 +148,21 @@ func afterboot(){
 }
 func acquire(addr string,  c chan string ){
 	log.Println("post: ", serverId)
-
-	jsonBody := Reqs{"acquire",nil, time.Now(),  serverId}
+	var maxmap = make(map[string]string)
+	maxmap["max"] = strconv.Itoa(max)
+	for k, v := range serverTable{
+		serverMap[k] = v.addr+ strconv.Itoa(v.status)
+	}
+	serverMap[serverId] = addr + "2"
+	jsonBody := Reqs{"acquire",serverMap, time.Now(),  serverId}
 	encode := new(bytes.Buffer)
 	json.NewEncoder(encode).Encode(jsonBody)
 	client := http.Client{}
-	//url := url.URL{Host:"localhost:9001"}
 	request, err := http.NewRequest("POST", addr, encode)
 	if err != nil {
 		log.Fatalln(err)
 	}
+	log.Println(serverTable)
 	log.Println("server acquire", jsonBody)
 	resp, err := client.Do(request)
 	if err != nil {
@@ -168,75 +170,36 @@ func acquire(addr string,  c chan string ){
 	}
 	log.Println("response:", resp)
 
-	var req Acquire
+	var req Reqs
 	if resp.Body == nil {
 		log.Println("error")
-		//http.Error(w, "Please send a request body", 400)
 		return
 	}
 	resperr := json.NewDecoder(resp.Body).Decode(&req)
 	if resperr != nil {
-		//http.Error(w, resperr.Error(), 400)
 		return
 	}
-	//id := req.Identify
-	// add
-	for id, data := range req.M{
-
-		for k, v := range data {
-			if store, ok := selfstore[id]; ok {
-				store[k] = v
-			} else {
-				selfstore[id] = make(map[string]string)
-				selfstore[id][k] = v
-			}
-		}
+	for k, v := range req.M{
+		store[k] = v
 	}
-
 	c <- addr
 
 }
 
-func choose(id string, key string) (s string, b bool){
+func choose(key string) (s string, b bool){
 
-	//var data map[string]string
-	if data, b := selfstore[id]; b{
-		//var v string
-		if v, b := data[key]; b{
-			return v, true
-
-		}else {
-			return "", false
-		}
+	if v, b := store[key]; b{
+		return v, true
 
 	}else {
-		if data, b:= helpstore[id]; b{
-
-			//var v string
-			if v, b := data[key]; b{
-				return v, true
-
-			}else {
-				return "", false
-			}
-
-		}else {
-			return "", false
-
-		}
-
+		return "", false
 	}
-
-
 }
 
 func PostHandler(w http.ResponseWriter, r *http.Request) {
-	//fmt.Println("msg", r)
 	if r.Method == "POST" {
-		fmt.Println("post")
 		var req Reqs
 		if r.Body == nil {
-			fmt.Println("error")
 			http.Error(w, "Please send a request body", 400)
 			return
 		}
@@ -245,19 +208,12 @@ func PostHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		id := req.Identify
 		switch req.Reqtype {
 
-		// request from client
 		case "add", "addmap":{
+			log.Println("get add ", req.M)
 			for k, v := range req.M{
-
-				if store, ok := selfstore[id]; ok{
-					store[k] = v
-				}else {
-					selfstore[id] = make(map[string]string)
-					selfstore[id][k] = v
-				}
+				store[k] = v
 			}
 			// TODO: response
 			var respMsg = Reqs{"succeed", nil, time.Now(), serverId}
@@ -269,12 +225,8 @@ func PostHandler(w http.ResponseWriter, r *http.Request) {
 
 			for k, _ := range req.M{
 
-				if store, ok := selfstore[id]; ok{
-
+				if _, ok := store[k]; ok{
 					delete(store, k)
-					if len(store) == 0{
-						delete(selfstore, id)
-					}
 				}
 
 			}
@@ -283,15 +235,11 @@ func PostHandler(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(respMsg)
 			log.Println(respMsg)
 		}
-		//case "modify": {
-		//
-		//
-		//}
 		case "choose":{
 			for k, _ := range req.M{
 				var s string
 				var ok bool
-				s, ok = choose(id, k)
+				s, ok = choose(k)
 				log.Println(s, ok)
 				// TODO: response
 				m := make(map[string]string)
@@ -302,48 +250,73 @@ func PostHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 		}
+		case "acquire":{
+			var reassign = make(map [string]string)
+			id, _ := strconv.Atoi(req.Identify)
+			log.Println("acquire get")
+			serverMap := req.M
+			log.Println(serverMap)
+			for k, v := range serverMap{
+				if k == "max"{
 
-		// request from other server
-		case "helpadd":{
+				}else{
+					log.Println("k ", k, ", v ", v)
+					addr := v[0: len(v) -1]
+					s, _:= strconv.Atoi(v[len(v) - 1: len(v)])
+					log.Println("addr ", addr, ", s ", s)
 
+					key, _ := strconv.Atoi(k)
+					serverTable[strconv.Itoa(key)] = serverStatus{addr, s}
+				}
+			}
+			for k, v := range store{
+				intk := assign(int(hashes(k)) % int(maximum))
+				log.Println(serverTable)
+
+				log.Println("id: ", id , ", intk: ", intk, "    ", int(hashes(k)) % int(maximum) )
+
+				if intk == id{
+					reassign[k] = v
+				}
+
+			}
+			log.Println(reassign)
+			if len(reassign) >0 {
+				var respMsg = Reqs{"successed", reassign, time.Now(), serverId}
+				json.NewEncoder(w).Encode(respMsg)
+
+				for k,_ := range reassign{
+					delete(store, k)
+				}
+			}else {
+				var respMsg = Reqs{"successed", nil, time.Now(), serverId}
+				json.NewEncoder(w).Encode(respMsg)
+			}
 
 		}
-		case "release":{
-
-
 		}
-		}
-		log.Println("selfstore: ", selfstore)
-		log.Println("helpstore: ", helpstore)
+		log.Println("store: ", store)
 	} else if r.Method == "GET" {
-		fmt.Println("get")
 		var u Reqs
 		if r.Body == nil {
-			fmt.Println("error")
 			http.Error(w, "Please send a request body", 400)
 			return
 		}
-		//fmt.Println(r.Body)
 		err := json.NewDecoder(r.Body).Decode(&u)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		//fmt.Println(u)
 		switch u.Reqtype{
 
-		// heart beat of proxy
 		case "touch":{
-
+			log.Println("get in touch with proxy")
 			var respMsg = Reqs{status, nil, time.Now(), serverId}
 			json.NewEncoder(w).Encode(respMsg)
-
+			log.Println("data", store)
 		}
 
 		}
-	} else{
-
-		fmt.Fprint(w, r.Method)
 	}
 }
 func init() {
@@ -354,7 +327,6 @@ func init() {
 	encode := new(bytes.Buffer)
 	json.NewEncoder(encode).Encode(jsonBody)
 	client := http.Client{}
-	//url := url.URL{Host:"localhost:9001"}
 	request, err := http.NewRequest("POST", proxy, encode)
 	if err != nil {
 		log.Fatalln(err)
@@ -368,37 +340,64 @@ func init() {
 	var id Reqs
 	json.NewDecoder(resp.Body).Decode(&id)
 	serverId = id.Identify
-	serverList := id.M
 
-	log.Println("identified: ", serverId)
+	serverMap := id.M
+	log.Println(serverMap)
+	for k, v := range serverMap{
+		if k == "max"{
 
+		}else{
+			log.Println("k ", k, ", v ", v)
+			addr := v[0: len(v) -1]
+			s, _:= strconv.Atoi(v[len(v) - 1: len(v)])
+			log.Println("addr ", addr, ", s ", s)
 
-	c := make(chan string)
-
-	for _, v := range serverList {
-		go acquire(v, c)
+			key, _ := strconv.Atoi(k)
+			serverTable[strconv.Itoa(key)] = serverStatus{addr, s}
+		}
 	}
-	r := <- c
-	log.Println("acquire from:", r)
-
-
-
-	afterboot()
-	log.Println("response:", resp)
+	max, _ = strconv.Atoi(serverMap["max"])
+	log.Println("identified: ", serverId)
+	log.Println("server table: ",serverTable)
 }
-func reassign(addr string,  c chan string ){
-	log.Println("post: ", serverId)
 
-	jsonBody := Reqs{"helpadd",nil, time.Now(),  serverId}
+func doPost(reqtype string, request string, addr string, data map[string] string, id string, c chan Reqs){
+	log.Println("assignment to ", addr, data)
+	jsonBody := Reqs{request,data, time.Now(),  id}
 	encode := new(bytes.Buffer)
 	json.NewEncoder(encode).Encode(jsonBody)
 	client := http.Client{}
-	//url := url.URL{Host:"localhost:9001"}
+	assign, err := http.NewRequest(reqtype, addr, encode)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	log.Println(reqtype, request, jsonBody)
+	resp, err := client.Do(assign)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	// TODO: parse responses
+	var resps Reqs
+	json.NewDecoder(resp.Body).Decode(&resps)
+	log.Println(resps)
+
+	c <- resps
+}
+
+
+func reassign(addr string,  c chan string ){
+	log.Println("post: ", serverId)
+
+	jsonBody := Reqs{"addmap",nil, time.Now(),  serverId}
+	encode := new(bytes.Buffer)
+	json.NewEncoder(encode).Encode(jsonBody)
+	client := http.Client{}
 	request, err := http.NewRequest("POST", addr, encode)
 	if err != nil {
 		log.Fatalln(err)
 	}
-	log.Println("server helpadd", jsonBody)
+	log.Println("server help add", jsonBody)
 	resp, err := client.Do(request)
 	if err != nil {
 		log.Fatalln(err)
@@ -408,28 +407,12 @@ func reassign(addr string,  c chan string ){
 	var req Reqs
 	if resp.Body == nil {
 		log.Println("error")
-		//http.Error(w, "Please send a request body", 400)
 		return
 	}
 	resperr := json.NewDecoder(resp.Body).Decode(&req)
 	if resperr != nil {
-		//http.Error(w, resperr.Error(), 400)
 		return
 	}
-	//id := req.Identify
-	// add
-	//for id, data := range req.M{
-	//
-	//	for k, v := range data {
-	//		if store, ok := selfstore[id]; ok {
-	//			store[k] = v
-	//		} else {
-	//			selfstore[id] = make(map[string]string)
-	//			selfstore[id][k] = v
-	//		}
-	//	}
-	//}
-
 	c <- addr
 
 }
@@ -439,15 +422,12 @@ func shutdown(b chan bool){
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
 	sig := <-sigs
-	fmt.Println()
-	fmt.Println(sig)
+	log.Println(sig)
 
-	// get available serverlist
 	jsonBody := Reqs{"onshut",nil, time.Now(),  serverId}
 	encode := new(bytes.Buffer)
 	json.NewEncoder(encode).Encode(jsonBody)
 	client := http.Client{}
-	//url := url.URL{Host:"localhost:9001"}
 	request, err := http.NewRequest("POST", proxy, encode)
 	if err != nil {
 		log.Fatalln(err)
@@ -462,107 +442,130 @@ func shutdown(b chan bool){
 	log.Println("get response:", resps)
 	// TODO: parse responses
 	serverList := resps.M
-	//log.Println(s)
-	//return s, returnMap,nil
 
-
+	for k, v := range serverList{
+		s, _ := strconv.Atoi(v[len(v )- 1: len(v)])
+		serverTable[k] = serverStatus{v[0:len(v) - 1], s}
+	}
 	var reassign  = make(map[string] map[string]string)
 	var i = 0
-			for k, _ := range serverTable{
-
-			if k > i{
-				i = k
-				}
+	for ki, _ := range serverTable{
+		k,_ := strconv.Atoi(ki)
+		if k > i{
+			i = k
+		}
+	}
+	log.Print("server Table ", serverTable)
+	delete(serverTable, serverId)
+	for k, v := range store {
+		intk, _ := strconv.Atoi(k)
+		var newKey = strconv.Itoa(assign(int(hashes(string(int64(intk) * 9527 << 5)) % int64(maximum))))
+		log.Println(newKey)
+		if _, ok := serverTable[newKey]; ok {
+			serverMap := reassign[serverTable[newKey].addr]
+			if nil == serverMap {
+				serverMap = make(map[string]string)
 			}
-	addr := make(chan string)
-		for user, data := range selfstore{
-			for k, v := range data{
-				intk,_ := strconv.Atoi(k)
-				newKey:= strconv.Itoa(int(hashes(string(int64(intk) * 9527 << 5)) % int64(i)))
+			serverMap[k] = v
+			reassign[serverTable[newKey].addr] = serverMap
 
-				if _, ok := serverList[newKey]; ok {
-					//reassign[available[key]] = m
-					serverMap := reassign[serverList[newKey]]
-					if nil == serverMap {
-						serverMap = make(map[string] string)
-					}
-					serverMap[k] = v
-					reassign[serverList[newKey]] = serverMap
-
-				}else {
-					var next = availableNext(serverList, newKey)
-					serverMap := reassign[serverList[next]]
-					if nil == serverMap {
-						serverMap = make(map[string] string)
-					}
-					serverMap[k] = v
-					reassign[serverList[next]] = serverMap
-				go
-
+		} else {
+			var next = strconv.Itoa(availableNext(serverTable, newKey))
+			serverMap := reassign[serverTable[newKey].addr]
+			if nil == serverMap {
+				serverMap = make(map[string]string)
 			}
+			serverMap[k] = v
+			reassign[serverTable[next].addr] = serverMap
 
 		}
-		//for
-		//var newKey = int(hashes(string(int64(key) * 9527 << 5)) % int64(max))
-		//if _, ok := available[newKey]; ok {
-		//	//reassign[available[key]] = m
-		//	serverMap := reassign[available[newKey]]
-		//	if nil == serverMap {
-		//		serverMap = make(map[string] string)
-		//	}
-		//	serverMap[k] = v
-		//	reassign[available[newKey]] = serverMap
-		//
-		//}else {
-		//	var next = availableNext(available, newKey)
-		//	serverMap := reassign[available[next]]
-		//	if nil == serverMap {
-		//		serverMap = make(map[string] string)
-		//	}
-		//	serverMap[k] = v
-		//	reassign[available[next]] = serverMap
-		//
-		//jsonBody := Reqs{"helpadd",, time.Now(),  id}
-		//encode := new(bytes.Buffer)
-		//json.NewEncoder(encode).Encode(jsonBody)
-		//client := http.Client{}
-		////url := url.URL{Host:"localhost:9001"}
-		//request, err := http.NewRequest("POST", proxy, encode)
-		//if err != nil {
-		//	log.Fatalln(err)
-		//}
-		//log.Println("post: add ", jsonBody)
-		//resp, err := client.Do(request)
-		//if err != nil {
-		//	log.Fatalln(err)
-		//}
-		//var resps Reqs
-		//json.NewDecoder(resp.Body).Decode(&resps)
-		//log.Println("get response:", resps)
-		//// TODO: parse responses
-		//s, returnMap = parseReq(resps)
-		//log.Println(s)
 
-		b <- true
+	}
+	log.Println("servers help add ")
+
+	var msg Reqs
+	c := make(chan Reqs)
+	if len(reassign) > 0 {
+		for s, m := range reassign {
+			go doPost("POST", "addmap", s, m, serverId, c)
+		}
+		log.Println("servers help add end")
+		msg = <-c
+
+	}else {
+		log.Println("nothing to add")
+
+	}
+
+
+
+	end := make(chan Reqs)
+	go doPost("POST" , "shutdown" , proxy , nil, serverId, end)
+	msg = <- end
+	log.Println(msg)
+	b <- true
+
 
 
 }
+
+func acquireData(){
+
+	 serverList := make(map [string]string)
+	 for k, v:= range serverTable{
+
+	 	if v.status != 0{
+	 		serverList[k] = v.addr
+		}
+	 }
+	if len(serverList) > 0 {
+		c := make(chan string)
+		for _, v := range serverTable {
+			if v.status != 0{
+				go acquire(v.addr, c)
+
+			}
+		}
+		r := <-c
+		log.Println("acquire from:", r)
+
+	}else {
+		log.Println("clean server")
+	}
+	afterboot()
+}
+
+func startHttpServer() *http.Server {
+	srv := &http.Server{Addr: port}
+	http.HandleFunc("/", PostHandler)
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil {
+			log.Printf("Httpserver: ListenAndServe() error: %s", err)
+		}
+	}()
+
+	return srv
+}
+
+
 func main() {
+
+
 	done := make(chan bool, 1)
 
 	results = append(results, time.Now().Format(time.RFC3339))
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", PostHandler)
-
-	log.Fatal(http.ListenAndServe(port, mux))
-
+	go acquireData()
 	go shutdown(done)
+	srv := startHttpServer()
+
 	<-done
-	fmt.Println("exiting")
-	//mux := http.NewServeMux()
-	//mux.HandleFunc("/", GetHandler)
-	//mux.HandleFunc("/post", PostHandler)
-	//http.Post("localhost:9000", "123", nil)
-	//log.Printf("listening on port %s", *flagPort)
-	//log.Fatal(http.ListenAndServe(":" + *flagPort, mux))
+	if err := srv.Shutdown(nil); err != nil {
+		panic(err)
+	}
+
+	log.Println("end shutdown")
+
+	log.Println("exiting")
+
 }

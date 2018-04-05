@@ -1,7 +1,6 @@
 package main
 
 import(
-	"fmt"
 	"net/http"
 	"encoding/json"
 	"time"
@@ -9,12 +8,15 @@ import(
 	"flag"
 	"bytes"
 	"strconv"
+	"math/rand"
+	"strings"
 )
 
 var StartTime time.Time
 var results []string
 var serverTable = make(map[int]serverStatus)
-
+const maximum = 1<< 8
+var serverNum = 0
 type Reqs struct{
 
 	Reqtype string
@@ -35,7 +37,7 @@ type heartBeatReq struct{
 }
 type serverStatus struct{
 	addr string
-
+	// 0 = unboot
 	// 1 = booting, initialization, sync data from other server, not ready
 
 	// 2 = normal, regularly handling get/post request
@@ -58,29 +60,57 @@ type serverStatus struct{
 
 func addServer(s string) int{
 	i := 0
-	if len(serverTable) == maxNum(serverTable) + 1{
-		i = len(serverTable)
+	if len(serverTable) == 0{
+		serverTable[i] = serverStatus{s, 1}
+		return 0
 	}else {
-		//var ok bool
 
-		for i < maxNum(serverTable) {
-
-			if _, ok := serverTable[i]; ok{
-				continue
-			}else {
-				break
+		for k, v := range serverTable{
+			if v.status == 0{
+				serverTable[k] = serverStatus{s, 1}
+				return k
+			}
+		}
+		rand.Seed(95279527)
+		for true{
+			i = rand.Intn(maximum)
+			//var ok bool
+			if _, ok := serverTable[i]; !ok{
+				serverTable[i] = serverStatus{s, 1}
+				return i
 			}
 		}
 	}
+	return 0
+}
 
-	serverTable[i] = serverStatus{s, 1}
-	log.Println("add server: ", s, i)
-	return i
+func assign(i int) int{
+
+	if _, ok := serverTable[i]; ok && serverTable[i].status !=0{
+		return i
+	}
+	for ; i  >= 0; i--{
+		if _, ok := serverTable[i]; ok{
+			if serverTable[i].status ==0{
+				return assign(i - 1)
+			}
+			return i
+		}
+	}
+	for k := maximum - 1; k > i; k--{
+		if _, ok := serverTable[k]; ok{
+			if serverTable[k].status ==0{
+				return assign(k - 1)
+			}
+			return k
+		}
+	}
+	return 0
 }
 
 func updateServerStatus(s string, addr string, id string) int{
 
-
+	log.Println("update server: ", s, addr, id)
 	var statusNum int
 	var serverNum int
 	switch s {
@@ -103,11 +133,11 @@ func updateServerStatus(s string, addr string, id string) int{
 		statusNum = 0
 	}
 
-	if statusNum > 1 && statusNum < 4{
+	if statusNum > 1 && statusNum <= 4{
 		serverNum, err := strconv.Atoi(id)
 		if nil != err{
 
-			fmt.Println("unconvertable id: ", id)
+			log.Println("unconvertable id: ", id)
 		}
 		if serverTable[serverNum].status != statusNum{
 			serverTable[serverNum] = serverStatus{serverTable[serverNum].addr, statusNum}
@@ -118,7 +148,7 @@ func updateServerStatus(s string, addr string, id string) int{
 
 		return addServer(addr)
 	}
-	fmt.Println(serverNum)
+	log.Println(serverNum)
 	return serverNum
 
 }
@@ -128,7 +158,7 @@ func getAvailableServer(s string) map[int]serverStatus{
 	case "add", "addmap":{
 
 		for k, v := range serverTable{
-			if v.status == 2{
+			if v.status == 2 || v.status == 0{
 				status[k] = v
 			}
 
@@ -137,7 +167,7 @@ func getAvailableServer(s string) map[int]serverStatus{
 	case "choose", "remove", "modify":{
 
 		for k, v := range serverTable{
-			if v.status == 2 || v.status == 3 || v.status == 4{
+			if v.status == 2 || v.status == 3 || v.status == 4 || v.status == 0{
 				status[k] = v
 			}
 		}
@@ -151,10 +181,12 @@ func removeServer(s string){
 
 	num, err := strconv.Atoi(s)
 	if nil != err{
-		fmt.Println("unconvertable id: ", s)
+		log.Println("unconvertable id: ", s)
 
 	}
-	delete(serverTable, num)
+	status := serverStatus{serverTable[num].addr, 0}
+
+	serverTable[num] = status
 }
 
 func maxNum(m map[int]serverStatus) int{
@@ -179,7 +211,6 @@ func minNum(m map[int]serverStatus) int{
 }
 func availableNext(m map[int]serverStatus, i int) int{
 
-	//var next = 0
 	var temp = 1 << 31
 	for k, _ := range m{
 
@@ -235,7 +266,6 @@ func getHeartBeat(address string, c chan serverStatus) (s serverStatus, err erro
 }
 
 func handler(rw http.ResponseWriter, r *http.Request) {
-	//var msg []byte
 	uptime := time.Since(StartTime).String()
 	_, err := json.Marshal(heartBeat{"running", uptime})
 	if err != nil {
@@ -243,20 +273,17 @@ func handler(rw http.ResponseWriter, r *http.Request) {
 	}
 }
 
-//func RunHeartbeatService(address string) {
-//	http.HandleFunc("/heartbeat", handler)
-//	log.Println(http.ListenAndServe(address, nil))
-//}
 func touch(){
 
 	for true{
 		//var v serverStatus
-		time.Sleep(5 * time.Second)
+		time.Sleep(30 * time.Second)
 		if len(serverTable) > 0 {
 			c := make(chan serverStatus)
 			for _, v := range serverTable {
-				go getHeartBeat(v.addr, c)
-
+				if v.status != 0 && v.status != 1  {
+					go getHeartBeat(v.addr, c)
+				}
 			}
 			status := <-c
 			log.Println("get heart beat of ", status, " \nall server status", serverTable)
@@ -268,33 +295,18 @@ func touch(){
 
 }
 
-// GetHandler handles the index route
-//func GetHandler(w http.ResponseWriter, r *http.Request) {
-//	jsonBody, err := json.Marshal(results)
-//	if err != nil {
-//		http.Error(w, "Error converting results to json",
-//			http.StatusInternalServerError)
-//	}
-//	w.Write(jsonBody)
-//}
-
-// Handler converts request body to string
 func PostHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
-		fmt.Println("post")
 		var req Reqs
 		if r.Body == nil {
-			fmt.Println("error")
 			http.Error(w, "Please send a request body", 400)
 			return
 		}
-		fmt.Println(r.Body)
 		err := json.NewDecoder(r.Body).Decode(&req)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		//fmt.Println(req)
 		reqType := req.Reqtype
 		log.Println("msg: ", req)
 
@@ -303,18 +315,14 @@ func PostHandler(w http.ResponseWriter, r *http.Request) {
 		// from client
 		case "add", "addmap", "remove", "modify", "choose": {
 			var available = getAvailableServer(reqType)
-			fmt.Println("available server: ", available)
-			var max = maxNum(available) + 1
-
-			// assignment of servers
 			var reassign  = make(map[serverStatus] map[string]string)
+			log.Println(serverTable)
 			for k, v := range req.M{
 
 				// server status
-				var key = int(hashes(k) % int64(max))
-				if _, ok := available[key]; ok {
-					//reassign[available[key]] = m
-					//var serverMap = make(map[string]string)
+				var key = assign(int(hashes(k)) % int(maximum))
+				log.Println("-----------", k, v,int(hashes(k)) % int(maximum), key)
+				if _, ok := available[key]; ok && available[key].status != 0{
 
 					serverMap := reassign[available[key]]
 					if nil == serverMap {
@@ -326,9 +334,8 @@ func PostHandler(w http.ResponseWriter, r *http.Request) {
 				}else {
 
 					// hash one more time, reassign to available server, this could be done several times, but for simple scenario
-					var newKey = int(hashes(string(int64(key) * 9527 << 5)) % int64(max))
-					if _, ok := available[newKey]; ok {
-						//reassign[available[key]] = m
+					var newKey = assign(int(int(hashes(string(int64(key)))) % int(maximum)))
+					if _, ok := available[newKey];  ok && available[newKey].status != 0 {
 						serverMap := reassign[available[newKey]]
 						if nil == serverMap {
 							serverMap = make(map[string] string)
@@ -355,25 +362,47 @@ func PostHandler(w http.ResponseWriter, r *http.Request) {
 				go doPost( "POST",reqType, server, data, req.Identify, w, c)
 			}
 			respMsg := <- c
-			//var respMsg = Reqs{"test", nil, time.Now(), ""}
 			json.NewEncoder(w).Encode(respMsg)
 			log.Println("response: ", respMsg)
 		}
 
 		// servers status
 		case "onboot", "onshut", "normal", "full":{
+			log.Println("req: ", reqType)
 			var addr = req.M["addr"]
 			var serverNum = updateServerStatus(reqType, addr, req.Identify)
+			log.Println("identified: ", strconv.Itoa(serverNum))
+
 			var respMsg = Reqs{"identified", nil, time.Now(), strconv.Itoa(serverNum)}
 
 			if "onboot" == reqType{
 				var availableServer = getAvailableServer("choose")
-				var serverMap = make(map[string] string)
+				var serverMap = make(map[string] serverStatus)
+				serverMap["max"] = serverStatus{"",len(serverTable)}
 				for k, v := range availableServer{
-					serverMap[strconv.Itoa(k)] = v.addr
+					serverMap[strconv.Itoa(k)] = v
 				}
 				log.Println("identified: ", strconv.Itoa(serverNum))
-				respMsg.M = serverMap
+
+				reqMap := make(map[string]string)
+				for k, v := range serverMap{
+					reqMap[k] = v.addr+ strconv.Itoa(v.status)
+
+				}
+				respMsg.M = reqMap
+			}else if "onshut" == reqType{
+				var availableServer = getAvailableServer("add")
+				var serverMap = make(map[string] serverStatus)
+				for k, v := range availableServer{
+					serverMap[strconv.Itoa(k)] = v
+				}
+				reqMap := make(map[string]string)
+				for k, v := range serverMap{
+					reqMap[k] = v.addr+ strconv.Itoa(v.status)
+				}
+				respMsg.M = reqMap
+				log.Println("map: ", respMsg.M)
+
 			}
 			json.NewEncoder(w).Encode(respMsg)
 			log.Println(serverTable)
@@ -383,16 +412,23 @@ func PostHandler(w http.ResponseWriter, r *http.Request) {
 
 			removeServer(req.Identify)
 			log.Println(serverTable)
+			var respMsg = Reqs{"bye", nil, time.Now(), ""}
+			json.NewEncoder(w).Encode(respMsg)
 
 		}
 		case "serverlist" :{
 
 			var availableServer = getAvailableServer("choose")
-			var serverMap = make(map[string] string)
+			var serverMap = make(map[string] serverStatus)
 			for k, v := range availableServer{
-				serverMap[strconv.Itoa(k)] = v.addr
+				serverMap[strconv.Itoa(k)] = v
 			}
-			var respMsg = Reqs{"serverlist", serverMap, time.Now(), ""}
+			reqMap := make(map[string]string)
+			for k, v := range serverMap{
+				reqMap[k] = strings.Join([]string{v.addr, strconv.Itoa(v.status)},"")
+
+			}
+			var respMsg = Reqs{"serverlist", reqMap, time.Now(), ""}
 			json.NewEncoder(w).Encode(respMsg)
 
 			log.Println(serverMap)
@@ -410,7 +446,6 @@ func doPost(reqtype string, request string, server serverStatus, data map[string
 	encode := new(bytes.Buffer)
 	json.NewEncoder(encode).Encode(jsonBody)
 	client := http.Client{}
-	//url := url.URL{Host:"localhost:9001"}
 	assign, err := http.NewRequest(reqtype, server.addr, encode)
 	if err != nil {
 		log.Fatalln(err)
@@ -439,14 +474,6 @@ func init() {
 }
 
 func main() {
-	//results = append(results, time.Now().Format(time.RFC3339))
-	//
-	//mux := http.NewServeMux()
-	//mux.HandleFunc("/", GetHandler)
-	//mux.HandleFunc("/post", PostHandler)
-	//http.Post("localhost:9000", "123", nil)
-	//log.Printf("listening on port %s", *flagPort)
-	//log.Fatal(http.ListenAndServe(":" + *flagPort, mux))
 
 	results = append(results, time.Now().Format(time.RFC3339))
 
